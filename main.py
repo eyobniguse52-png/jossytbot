@@ -17,11 +17,14 @@ user_context = {}
 
 # ===== HANDLERS =====
 def start(update: Update, context: CallbackContext):
+    """🔥 Professional welcome message"""
     update.message.reply_text(
-        "👋 Welcome to YouTube Downloader!\n\n"
-        "🔗 Send any YouTube link",
+        "👋 Hey it's *Joss!* \n\n"
+        "📥 You want to download a YouTube link? \n"
+        "👉 Just *drop it here* — I'll handle the rest! 🚀",
+        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🚀 Start", callback_data='start')
+            InlineKeyboardButton("✅ Start", callback_data='start')
         ]])
     )
 
@@ -30,44 +33,38 @@ def handle_link(update: Update, context: CallbackContext):
     text = update.message.text.strip()
     
     if "youtube.com" not in text and "youtu.be" not in text:
-        update.message.reply_text("⚠️ Send a valid YouTube link")
+        update.message.reply_text("⚠️ Please send a valid YouTube link (e.g., youtu.be/abc123)")
         return
     
     update.message.reply_text("🔍 Fetching formats...")
     
     try:
-        # Get video info
-        ydl_opts = {'quiet': True}
+        # Use yt-dlp with safe options
+        ydl_opts = {
+            'quiet': True,
+            'extract_flat': False,
+            'no_warnings': True,
+            'skip_download': True
+        }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(text, download=False)
         
-        user_context[user_id] = {'link': text, 'title': info['title']}
+        user_context[user_id] = {'link': text, 'title': info.get('title', 'Video')}
         
-        # Build CLEAN format buttons (like your screenshot)
+        # Build CLEAN format list (only real ones)
         formats = []
-        seen_resolutions = set()
+        resolutions = {360, 480, 720, 1080}
         
         for f in info.get('formats', []):
-            # Only include real video/audio formats
-            if f.get('vcodec') == 'none' and f.get('acodec') != 'none':
-                # Audio only
-                if 'mp3' in f.get('ext', '') or 'm4a' in f.get('ext', ''):
-                    formats.append(('🎵 Audio (MP3)', 'bestaudio[ext=m4a]/bestaudio'))
-                    break  # Only add MP3 once
-            elif f.get('vcodec') != 'none' and f.get('height'):
-                res = f.get('height')
-                if res not in seen_resolutions:
-                    seen_resolutions.add(res)
-                    label = f"{res}p"
-                    formats.append((label, f'bestvideo[height={res}]+bestaudio/best[height={res}]'))
+            height = f.get('height')
+            if height in resolutions and f.get('vcodec') != 'none':
+                formats.append((f"{height}p", f'bestvideo[height={height}]+bestaudio'))
+                resolutions.discard(height)
         
-        # Add 1080p/720p/480p/360p explicitly if missing
-        default_res = [1080, 720, 480, 360]
-        for res in default_res:
-            if res not in seen_resolutions:
-                formats.append((f"{res}p", f'bestvideo[height={res}]+bestaudio/best[height={res}]'))
+        # Add audio (MP3 only)
+        formats.append(('🎵 Audio (MP3)', 'bestaudio[ext=m4a]/bestaudio'))
         
-        # Create 2-column layout (like your screenshot)
+        # Create 2-column layout
         keyboard = []
         for i in range(0, len(formats), 2):
             row = []
@@ -77,13 +74,15 @@ def handle_link(update: Update, context: CallbackContext):
             keyboard.append(row)
         
         update.message.reply_text(
-            f"✅ {info['title']}\n\n"
-            "🎯 Select format:",
+            f"🎬 *{info['title']}*\n\n"
+            "🎯 Choose format:",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
     except Exception as e:
-        update.message.reply_text(f"❌ Error: {str(e)[:50]}")
+        logger.error(f"Format error: {e}")
+        update.message.reply_text(f"❌ Error: {str(e)[:60]}")
 
 def download_format(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -94,7 +93,7 @@ def download_format(update: Update, context: CallbackContext):
         return
     
     fmt_id = query.data
-    query.message.edit_text("⏳ Downloading...")
+    query.message.edit_text("⏳ Downloading... (10-30 sec)")
     
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -102,24 +101,39 @@ def download_format(update: Update, context: CallbackContext):
                 'format': fmt_id,
                 'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
                 'quiet': True,
-                'no_warnings': True
+                'no_warnings': True,
+                'noplaylist': True,
+                'retries': 10,
+                'fragment_retries': 10,
+                'skip_unavailable_fragments': True
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(user_context[user_id]['link'], download=True)
                 file_path = ydl.prepare_filename(info)
             
+            # Fix file extension for Telegram
+            if file_path.endswith('.webm'):
+                new_path = file_path.replace('.webm', '.mp4')
+                os.rename(file_path, new_path)
+                file_path = new_path
+            
             # Send file
             if file_path.endswith(('.mp3', '.m4a')):
                 query.message.reply_audio(open(file_path, 'rb'), title=info['title'])
             else:
-                query.message.reply_video(open(file_path, 'rb'), caption=info['title'])
+                query.message.reply_video(
+                    open(file_path, 'rb'),
+                    caption=f"✅ {info['title']}",
+                    supports_streaming=True
+                )
         
         del user_context[user_id]
-        query.message.edit_text("✅ Done!")
+        query.message.edit_text("🎉 Download complete!")
         
     except Exception as e:
-        query.message.edit_text(f"❌ Failed: {str(e)[:60]}")
+        logger.error(f"Download error: {e}")
+        query.message.edit_text(f"❌ Failed: {str(e)[:80]}")
 
 def main():
     updater = Updater(TOKEN, use_context=True)
@@ -129,7 +143,7 @@ def main():
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_link))
     dp.add_handler(CallbackQueryHandler(download_format))
     
-    logger.info("✅ Bot ready")
+    logger.info("✅ Joss Bot ready")
     updater.start_polling(drop_pending_updates=True)
     updater.idle()
 
